@@ -1,0 +1,22 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * *"   # nightly regression
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt && python -m playwright install --with-deps chromium
+      - name: Unit, integration, API, data and browser tests
+        run: pytest tests --junitxml=reports/junit.xml
+      - name: AI evals (mock model = deterministic gate)
+        run: pytest evals && python -m evals.run_evals
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: reports, path: reports/ }
