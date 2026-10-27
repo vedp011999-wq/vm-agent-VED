@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VM Rightsizing Agent</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; color: #1d2330; }
+  section { border: 1px solid #e3e6eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; }
+  textarea { width: 100%; font: inherit; } button { font: inherit; padding: 4px 12px; cursor: pointer; }
+  .warn { color: #b26b00; } .bad { color: #c0362c; } .muted { color: #667085; }
+  #steps { font: 12px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<h1>VM Rightsizing Agent</h1>
+<p>Signed in as
+  <select id="role" data-testid="role"><option value="operator-key">operator</option><option value="approver-key">approver</option></select>
+</p>
+
+<section>
+  <h2>Fleet</h2>
+  <div id="issues" class="warn" data-testid="issues"></div>
+  <table><thead><tr><th>VM</th><th>Env</th><th>Size</th><th>CPU avg / peak</th><th>Mem avg / peak</th><th>Signal</th></tr></thead>
+    <tbody id="fleet"></tbody></table>
+</section>
+
+<section>
+  <h2>Ask the agent</h2>
+  <textarea id="goal" data-testid="goal" rows="2">Find underutilized prod VMs and propose rightsizing.</textarea>
+  <button id="run" data-testid="run">Run agent</button>
+  <div id="error" class="bad" data-testid="error"></div>
+</section>
+
+<section id="result" hidden>
+  <h2>Run <span id="status" data-testid="status"></span></h2>
+  <p id="summary" data-testid="summary"></p>
+  <ul id="actions"></ul>
+  <details open><summary>Agent activity (execution history)</summary><ol id="steps"></ol></details>
+</section>
+
+<script>
+// Everything is rendered with textContent, never innerHTML: source data (like vm-006's description) can't inject HTML.
+const $ = (id) => document.getElementById(id);
+let run = null;
+
+function el(tag, text, attrs = {}) {
+  const e = document.createElement(tag);
+  if (text !== undefined) e.textContent = text;
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, { method, body: body && JSON.stringify(body),
+    headers: { "Content-Type": "application/json", "X-API-Key": $("role").value } });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`${res.status}: ${JSON.stringify(data.detail)}`);
+  return data;
+}
+
+async function loadFleet() {
+  const { vms, issues } = await api("GET", "/api/vms");
+  $("fleet").replaceChildren(...vms.map((v) => {
+    const tr = el("tr", undefined, { "data-testid": `row-${v.id}` });
+    [v.id + " " + v.name, v.environment, v.size, `${v.cpu_avg ?? "-"}% / ${v.cpu_peak ?? "-"}%`,
+     `${v.mem_avg ?? "-"}% / ${v.mem_peak ?? "-"}%`, v.signal].forEach((t) => tr.append(el("td", t)));
+    return tr;
+  }));
+  $("issues").replaceChildren(...issues.map((i) => el("div", "⚠ " + i)));
+}
+
+function show(r) {
+  run = r;
+  $("result").hidden = false;
+  $("status").textContent = r.status;
+  $("summary").textContent = r.error ? "Error: " + r.error : (r.summary || "");
+  const approver = $("role").value === "approver-key";
+  $("actions").replaceChildren(...r.actions.map((a) => {
+    const li = el("li", `${a.vm_id}: ${a.from_size} → ${a.to_size}, saves $${a.monthly_savings}/mo — ${a.reason} — `,
+                  { "data-testid": `action-${a.vm_id}` });
+    li.append(el("b", a.status + (a.error ? ` (${a.error})` : "")));
+    if (approver && a.status === "pending") {
+      for (const d of ["approve", "reject"]) {
+        const b = el("button", d, { "data-testid": `${d}-${a.vm_id}` });
+        b.onclick = () => decide(a.id, d);
+        li.append(" ", b);
+      }
+    }
+    return li;
+  }));
+  $("steps").replaceChildren(...r.steps.map((s) =>
+    el("li", `[${s.kind}] ${s.name} ${s.ms ? s.ms + "ms " : ""}${JSON.stringify(s.detail ?? "")}`, s.ok ? {} : { class: "bad" })));
+}
+
+async function guarded(fn) {
+  $("error").textContent = "";
+  try { await fn(); await loadFleet(); } catch (e) { $("error").textContent = e.message; }
+}
+
+$("run").onclick = () => guarded(async () => show(await api("POST", "/api/runs", { goal: $("goal").value })));
+const decide = (id, d) => guarded(async () => show(await api("POST", `/api/runs/${run.id}/actions/${id}`, { decision: d })));
+$("role").onchange = () => run && show(run);
+loadFleet().catch((e) => ($("error").textContent = e.message));
+</script>
+</body>
+</html>
